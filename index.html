@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IA OCR Extractor</title>
+    <!-- Tailwind CSS pour un design moderne sans fichier externe -->
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen p-10 font-sans">
+
+    <div class="max-w-4xl mx-auto bg-white p-8 rounded-xl shadow-lg">
+        <h1 class="text-3xl font-bold text-gray-800 mb-2">Extracteur de Documents IA</h1>
+        <p class="text-gray-500 mb-8">Uploadez une facture ou un reçu (Format Image : PNG, JPG). Le moteur Celery l'analysera en arrière-plan.</p>
+
+        <!-- Zone d'upload -->
+        <div class="border-4 border-dashed border-blue-200 rounded-lg p-10 text-center bg-blue-50">
+            <input type="file" id="fileInput" class="hidden" accept="image/png, image/jpeg">
+            <button type="button" onclick="document.getElementById('fileInput').click()" class="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition shadow-md">
+                Sélectionner une image
+            </button>
+            <p id="fileName" class="mt-4 text-gray-600 font-medium"></p>
+        </div>
+
+        <!-- Bouton d'envoi (CORRIGÉ : type="button" ajouté) -->
+        <button type="button" id="uploadBtn" class="w-full mt-4 bg-green-500 text-white px-6 py-3 rounded-lg font-bold hidden hover:bg-green-600 transition shadow-md">
+            Lancer l'Extraction IA
+        </button>
+
+        <!-- Zone de résultat (Masquée par défaut) -->
+        <div id="resultZone" class="mt-10 hidden">
+            <h2 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                Statut : <span id="statusBadge" class="ml-3 px-3 py-1 bg-yellow-100 text-yellow-800 text-sm rounded-full animate-pulse">En cours d'analyse...</span>
+            </h2>
+
+            <div class="grid grid-cols-2 gap-6">
+                <!-- Bloc Données JSON -->
+                <div class="bg-gray-900 rounded-lg p-4 shadow-inner text-green-400 font-mono text-sm overflow-auto h-80">
+                    <h3 class="text-white mb-2 font-sans border-b border-gray-700 pb-2">Données Structurées (JSON)</h3>
+                    <pre id="jsonResult">Attente des données...</pre>
+                </div>
+
+                <!-- Bloc Texte Brut -->
+                <div class="bg-gray-50 border rounded-lg p-4 text-gray-700 text-xs overflow-auto h-80">
+                    <h3 class="font-bold text-gray-800 mb-2 border-b pb-2">Texte Brut (Tesseract OCR)</h3>
+                    <pre id="rawText" class="whitespace-pre-wrap">Attente du texte...</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = "http://localhost:8000/api/documents/";
+        let pollingInterval;
+
+        // 1. Afficher le nom du fichier sélectionné
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            if(e.target.files.length > 0) {
+                document.getElementById('fileName').innerText = "📄 " + e.target.files[0].name;
+                document.getElementById('uploadBtn').classList.remove('hidden');
+                
+                // Réinitialiser l'interface si on sélectionne une nouvelle image
+                document.getElementById('resultZone').classList.add('hidden');
+            }
+        });
+
+        // 2. Envoyer l'image au serveur Django
+        document.getElementById('uploadBtn').addEventListener('click', async (e) => {
+            
+            e.preventDefault(); // CORRIGÉ : Empêche la page de se recharger
+
+            const file = document.getElementById('fileInput').files[0];
+            if (!file) return;
+
+            // Préparation visuelle
+            document.getElementById('uploadBtn').classList.add('hidden');
+            document.getElementById('resultZone').classList.remove('hidden');
+            document.getElementById('statusBadge').className = "ml-3 px-3 py-1 bg-yellow-100 text-yellow-800 text-sm rounded-full animate-pulse";
+            document.getElementById('statusBadge').innerText = "En cours d'analyse...";
+            document.getElementById('jsonResult').innerText = "Attente des données...";
+            document.getElementById('rawText').innerText = "Attente du texte...";
+
+            const formData = new FormData();
+            formData.append("image", file);
+
+            try {
+                console.log("Envoi de l'image au serveur...");
+                const response = await fetch(API_URL, { method: 'POST', body: formData });
+                
+                // Gestion des erreurs de Django (ex: Mauvais format)
+                if (!response.ok) {
+                    const errorDetail = await response.json();
+                    console.error("Erreur serveur détaillée :", errorDetail);
+                    alert("Refus du serveur : " + JSON.stringify(errorDetail));
+                    
+                    document.getElementById('resultZone').classList.add('hidden');
+                    document.getElementById('uploadBtn').classList.remove('hidden');
+                    return; 
+                }
+                
+                const data = await response.json();
+                console.log("Image acceptée, ID:", data.id);
+                
+                // Lancer la boucle de vérification
+                pollResult(data.id);
+            } catch (error) {
+                console.error("Erreur réseau :", error);
+                alert("Erreur de connexion à l'API. Vérifiez que Docker tourne bien.");
+                document.getElementById('resultZone').classList.add('hidden');
+                document.getElementById('uploadBtn').classList.remove('hidden');
+            }
+        });
+
+        // 3. Boucle de vérification (Polling)
+        async function pollResult(documentId) {
+            pollingInterval = setInterval(async () => {
+                try {
+                    console.log(`Vérification du statut pour ${documentId}...`);
+                    const response = await fetch(`${API_URL}${documentId}/`);
+                    const data = await response.json();
+                    
+                    console.log("Réponse du serveur:", data);
+
+                    // Si la tâche Celery a fini (succès ou erreur)
+                    if (data.status === 'completed' || data.status === 'error') {
+                        clearInterval(pollingInterval); // On arrête la boucle
+                        
+                        // Mise à jour visuelle du statut
+                        const badge = document.getElementById('statusBadge');
+                        badge.className = data.status === 'completed' 
+                            ? "ml-3 px-3 py-1 bg-green-100 text-green-800 text-sm rounded-full font-bold"
+                            : "ml-3 px-3 py-1 bg-red-100 text-red-800 text-sm rounded-full font-bold";
+                        badge.innerText = data.status === 'completed' ? "Terminé !" : "Erreur !";
+
+                        // Affichage des données extraites
+                        document.getElementById('jsonResult').innerText = data.structured_data 
+                            ? JSON.stringify(data.structured_data, null, 2) 
+                            : "Aucune donnée structurée trouvée.";
+                            
+                        document.getElementById('rawText').innerText = data.extracted_text || "Aucun texte extrait.";
+                    }
+                } catch (error) {
+                    console.error("Erreur lors de la vérification:", error);
+                    clearInterval(pollingInterval);
+                }
+            }, 2000); // Répète l'appel toutes les 2 secondes
+        }
+    </script>
+</body>
+</html>
